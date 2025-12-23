@@ -8,19 +8,23 @@ use tun::{Configuration, AsyncDevice};
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 pub fn create_device(address: &str, netmask: &str) -> Result<AsyncDevice> {
-    // ... (之前的代码保持不变) ...
-    // 这里省略，和之前一样
-    
     let ip = Ipv4Addr::from_str(address)?;
     let mask = Ipv4Addr::from_str(netmask)?;
+    
     let mut config = Configuration::default();
-    config.address(ip).netmask(mask).up();
+    config
+        .address(ip)
+        .netmask(mask)
+        .destination(ip) // 添加 destination，对于点对点接口很重要
+        .up();
 
     #[cfg(target_os = "linux")]
     config.platform(|config| { config.packet_information(false); });
 
     #[cfg(target_os = "macos")]
-    config.platform(|_config| { });
+    config.platform(|_config| { 
+        // macOS utun 设备默认需要 4 字节头部
+    });
 
     let dev = tun::create_as_async(&config)?;
     Ok(dev)

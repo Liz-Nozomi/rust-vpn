@@ -14,3 +14,10 @@ chacha20poly1305 = "0.10"
 rand = "0.8"
 # 错误处理 (可选，但推荐，或者直接用 anyhow)
 anyhow = "1.0"
+# ECDH 密钥交换 (X25519)
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+# 快速的密钥派生函数
+blake3 = "1.5"
+# 序列化握手消息
+serde = { version = "1.0", features = ["derive"] }
+bincode = "1.3"

@@ -9,14 +9,25 @@ use anyhow::Result;
 
 // 引入核心库
 use vpn_core::symmetric::Cipher;
+use vpn_core::handshake::{ServerHandshake, HandshakeMessage, serialize_message, deserialize_message};
 
-// 硬编码密钥 (需与 Client 一致)
-const KEY: &[u8; 32] = b"0123456789abcdef0123456789abcdef";
+// 预共享密钥 (PSK) - 需与客户端一致
+const PSK: &[u8; 32] = b"0123456789abcdef0123456789abcdef";
 // 监听端口
 const LISTEN_ADDR: &str = "0.0.0.0:9000";
 
 /// 定义 PeerMap: 记录 虚拟IP (10.0.0.x) -> 真实 UDP 地址 的映射
 type PeerMap = Arc<Mutex<HashMap<Ipv4Addr, SocketAddr>>>;
+
+/// 会话信息：记录每个客户端的会话密钥和状态
+struct Session {
+    session_key: [u8; 32],
+    #[allow(dead_code)]
+    peer_addr: SocketAddr,
+}
+
+/// 会话表：UDP地址 -> Session
+type SessionMap = Arc<Mutex<HashMap<SocketAddr, Session>>>;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -25,18 +36,16 @@ async fn main() -> Result<()> {
     let socket = UdpSocket::bind(LISTEN_ADDR).await?;
     println!("📡 正在监听 UDP: {}", socket.local_addr()?);
     
-    // 用 Arc 包裹 Socket 和 Cipher 以便在闭包中使用（虽然目前是单循环，但养成好习惯）
     let socket = Arc::new(socket);
-    let cipher = Arc::new(Cipher::new(KEY)?);
     
-    // 初始化空的 Peer 表
+    // 初始化空的 Peer 表和会话表
     let peers: PeerMap = Arc::new(Mutex::new(HashMap::new()));
+    let sessions: SessionMap = Arc::new(Mutex::new(HashMap::new()));
 
     let mut buf = [0u8; 4096]; // 接收缓冲区
 
     loop {
         // 2. 接收 UDP 数据
-        // recv_from 返回 (字节数, 来源地址)
         let (len, src_addr) = match socket.recv_from(&mut buf).await {
             Ok(res) => res,
             Err(e) => {
@@ -45,65 +54,174 @@ async fn main() -> Result<()> {
             }
         };
 
-        let encrypted_data = &buf[..len];
-
-        // 3. 解密
-        // 只有解密成功，我们才认为这是一个合法的 VPN 包
-        let ip_packet = match cipher.decrypt(encrypted_data) {
-            Ok(data) => data,
-            Err(_) => {
-                // 解密失败通常意味着干扰流量或错误密钥，静默丢弃或打印日志
-                // eprintln!("来自 {} 的数据解密失败", src_addr);
-                continue;
-            }
-        };
-
-        // 4. 解析 IP 头 (获取源 IP 和 目的 IP)
-        // 这是一个纯粹的字节操作，不需要复杂的库
-        let (src_ip, dst_ip) = match parse_ipv4_header(&ip_packet) {
-            Ok(ips) => ips,
-            Err(e) => {
-                eprintln!("无效的 IP 包: {}", e);
-                continue;
-            }
-        };
-
-        // 5. 【核心逻辑】: 学习与更新路由表
-        // 只要能解密且 IP 格式正确，就认为这个物理地址属于这个虚拟 IP
-        {
-            let mut map = peers.lock().await;
-            // 如果是新客户端，或者地址变了，打印一下
-            if map.get(&src_ip) != Some(&src_addr) {
-                println!("🔗 客户端上线/更新: {} -> {}", src_ip, src_addr);
-                map.insert(src_ip, src_addr);
-            }
+        let raw_data = &buf[..len];
+        
+        // 3. 尝试识别是握手消息还是数据包
+        // 握手消息可以通过 bincode 反序列化成 HandshakeMessage
+        if let Ok(handshake_msg) = deserialize_message(raw_data) {
+            // 这是握手消息
+            handle_handshake(
+                &socket,
+                src_addr,
+                handshake_msg,
+                &sessions,
+                &peers,
+            ).await;
+            continue;
         }
+        
+        // 4. 否则，这是加密的数据包
+        handle_data_packet(
+            &socket,
+            src_addr,
+            raw_data,
+            &peers,
+            &sessions,
+        ).await;
+    }
+}
 
-        // 6. 转发逻辑
-        let target_peer = {
-            let map = peers.lock().await;
-            map.get(&dst_ip).cloned()
-        };
-
-        // ❌ 之前写错了: match target_addr
-        // ✅ 改成这样:
-        match target_peer {
-            Some(addr) => {
-                // 目标在线 -> 转发
-                match cipher.encrypt(&ip_packet) {
-                    Ok(new_packet) => {
-                        socket.send_to(&new_packet, addr).await?;
-                        println!("🔁 转发: {} -> {}", src_ip, dst_ip);
-                    }
-                    Err(e) => eprintln!("加密转发失败: {}", e),
+/// 处理握手消息
+async fn handle_handshake(
+    socket: &UdpSocket,
+    client_addr: SocketAddr,
+    msg: HandshakeMessage,
+    sessions: &SessionMap,
+    peers: &PeerMap,
+) {
+    match msg {
+        HandshakeMessage::ClientHello { client_pubkey, client_id, virtual_ip } => {
+            println!("🤝 收到握手请求: {} ({}) IP: {}", client_id, client_addr, virtual_ip);
+            
+            // 创建服务端握手实例
+            let server_handshake = ServerHandshake::new(PSK);
+            
+            // 生成 ServerHello
+            let server_hello = server_handshake.process_client_hello(client_pubkey);
+            
+            // 计算会话密钥（消耗 server_handshake）
+            let session_key = match server_handshake.compute_session_key(client_pubkey) {
+                Ok(key) => key,
+                Err(e) => {
+                    eprintln!("❌ 密钥计算失败: {}", e);
+                    return;
+                }
+            };
+            
+            // 保存会话
+            {
+                let mut map = sessions.lock().await;
+                map.insert(client_addr, Session {
+                    session_key,
+                    peer_addr: client_addr,
+                });
+            }
+            
+            // 立即建立路由映射（解析虚拟 IP）
+            if let Ok(vip) = virtual_ip.parse::<Ipv4Addr>() {
+                let mut peer_map = peers.lock().await;
+                peer_map.insert(vip, client_addr);
+                println!("   🗺️  路由映射: {} -> {}", vip, client_addr);
+            }
+            
+            // 发送 ServerHello
+            if let Ok(response) = serialize_message(&server_hello) {
+                if let Err(e) = socket.send_to(&response, client_addr).await {
+                    eprintln!("发送 ServerHello 失败: {}", e);
+                } else {
+                    println!("   ✅ 握手完成，会话已建立");
                 }
             }
+        }
+        _ => {
+            // 其他握手消息类型（ClientFinish等）暂不实现
+        }
+    }
+}
+
+/// 处理加密数据包
+async fn handle_data_packet(
+    socket: &UdpSocket,
+    src_addr: SocketAddr,
+    encrypted_data: &[u8],
+    peers: &PeerMap,
+    sessions: &SessionMap,
+) {
+    // 1. 查找会话
+    let session_key = {
+        let map = sessions.lock().await;
+        match map.get(&src_addr) {
+            Some(session) => session.session_key,
             None => {
-                // 目标不在表里
-                println!("🚫 丢弃: {} -> {} (目标未上线)", src_ip, dst_ip);
+                // 未握手的客户端，静默丢弃
+                return;
             }
         }
+    };
+    
+    // 2. 解密
+    let cipher = match Cipher::new(&session_key) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    
+    let ip_packet = match cipher.decrypt(encrypted_data) {
+        Ok(data) => data,
+        Err(_) => {
+            // 解密失败，可能是错误的数据
+            return;
+        }
+    };
 
+    // 3. 解析 IP 头
+    let (src_ip, dst_ip) = match parse_ipv4_header(&ip_packet) {
+        Ok(ips) => ips,
+        Err(_) => return,
+    };
+
+    // 4. 更新路由表
+    {
+        let mut map = peers.lock().await;
+        if map.get(&src_ip) != Some(&src_addr) {
+            println!("🔗 客户端上线/更新: {} -> {}", src_ip, src_addr);
+            map.insert(src_ip, src_addr);
+        }
+    }
+
+    // 5. 转发逻辑
+    let target_peer = {
+        let map = peers.lock().await;
+        map.get(&dst_ip).cloned()
+    };
+
+    match target_peer {
+        Some(target_addr) => {
+            // 查找目标的会话密钥
+            let target_session_key = {
+                let map = sessions.lock().await;
+                match map.get(&target_addr) {
+                    Some(s) => s.session_key,
+                    None => return, // 目标未握手
+                }
+            };
+            
+            // 用目标的会话密钥重新加密
+            let target_cipher = match Cipher::new(&target_session_key) {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+            
+            match target_cipher.encrypt(&ip_packet) {
+                Ok(new_packet) => {
+                    let _ = socket.send_to(&new_packet, target_addr).await;
+                    println!("🔁 转发: {} -> {}", src_ip, dst_ip);
+                }
+                Err(e) => eprintln!("加密转发失败: {}", e),
+            }
+        }
+        None => {
+            println!("🚫 丢弃: {} -> {} (目标未上线)", src_ip, dst_ip);
+        }
     }
 }
 
