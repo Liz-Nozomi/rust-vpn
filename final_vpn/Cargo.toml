@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = [
+    "vpn_core",
+    "vpn_client",
+    "vpn_server",
+]

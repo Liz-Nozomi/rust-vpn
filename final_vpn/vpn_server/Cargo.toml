@@ -1,0 +1,18 @@
+[package]
+name = "vpn_server"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# 引用本地的 core 库
+vpn_core = { path = "../vpn_core" }
+
+tun = { version = "0.6", features = ["async"] }
+tokio = { version = "1", features = ["full"] }
+hex = "0.4"
+# 现代、快速的 AEAD 加密库
+chacha20poly1305 = "0.10"
+# 用于生成随机 Nonce
+rand = "0.8"
+# 错误处理 (可选，但推荐，或者直接用 anyhow)
+anyhow = "1.0"
