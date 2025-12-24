@@ -10,6 +10,7 @@ use anyhow::Result;
 // 引入核心库
 use vpn_core::symmetric::Cipher;
 use vpn_core::handshake::{ServerHandshake, HandshakeMessage, serialize_message, deserialize_message};
+use vpn_core::asymmetric::{ServerIdentity, get_keys_dir};
 
 // 预共享密钥 (PSK) - 需与客户端一致
 const PSK: &[u8; 32] = b"0123456789abcdef0123456789abcdef";
@@ -33,6 +34,13 @@ type SessionMap = Arc<Mutex<HashMap<SocketAddr, Session>>>;
 async fn main() -> Result<()> {
     // 1. 初始化
     println!("🚀 VPN Server 启动中...");
+    
+    // 加载或生成服务端密钥对
+    let keys_dir = get_keys_dir()?;
+    let server_identity = ServerIdentity::load_or_generate(&keys_dir)?;
+    server_identity.print_public_key();
+    let server_identity = Arc::new(server_identity);
+    
     let socket = UdpSocket::bind(LISTEN_ADDR).await?;
     println!("📡 正在监听 UDP: {}", socket.local_addr()?);
     
@@ -66,6 +74,7 @@ async fn main() -> Result<()> {
                 handshake_msg,
                 &sessions,
                 &peers,
+                &server_identity,
             ).await;
             continue;
         }
@@ -88,6 +97,7 @@ async fn handle_handshake(
     msg: HandshakeMessage,
     sessions: &SessionMap,
     peers: &PeerMap,
+    server_identity: &ServerIdentity,
 ) {
     match msg {
         HandshakeMessage::ClientHello { client_pubkey, client_id, virtual_ip } => {
@@ -96,8 +106,19 @@ async fn handle_handshake(
             // 创建服务端握手实例
             let server_handshake = ServerHandshake::new(PSK);
             
-            // 生成 ServerHello
-            let server_hello = server_handshake.process_client_hello(client_pubkey);
+            // 生成 ServerHello（不包含签名）
+            let mut server_hello = server_handshake.process_client_hello(client_pubkey);
+            
+            // 对握手消息签名：签名内容 = server_pubkey || client_pubkey
+            if let HandshakeMessage::ServerHello { server_pubkey, ref mut signature } = server_hello {
+                let message_to_sign = [
+                    &server_pubkey[..],
+                    &client_pubkey[..],
+                ].concat();
+                
+                *signature = server_identity.sign(&message_to_sign);
+                println!("   ✍️  已对握手消息签名");
+            }
             
             // 计算会话密钥（消耗 server_handshake）
             let session_key = match server_handshake.compute_session_key(client_pubkey) {

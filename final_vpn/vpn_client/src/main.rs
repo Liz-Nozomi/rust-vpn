@@ -17,6 +17,7 @@ use tun::Device; // 这一行可能需要依赖具体的 tun 库导出，如果�
 use vpn_core::local_tun; 
 use vpn_core::symmetric::Cipher;
 use vpn_core::handshake::{ClientHandshake, HandshakeMessage, serialize_message, deserialize_message};
+use vpn_core::asymmetric::{ClientVerifier, get_keys_dir};
 
 // 预共享密钥 (PSK) - 用于握手认证
 // 注意：服务端必须使用完全相同的 PSK！
@@ -31,11 +32,32 @@ async fn perform_handshake(
 ) -> Result<[u8; 32], Box<dyn Error>> {
     println!("🤝 开始握手...");
     
+    // 0. 加载服务端公钥
+    let keys_dir = get_keys_dir()?;
+    let public_key_path = keys_dir.join("server_public.key");
+    
+    if !public_key_path.exists() {
+        return Err(format!(
+            "❗ 找不到服务端公钥文件: {}\n\n请先启动服务端生成密钥对！",
+            public_key_path.display()
+        ).into());
+    }
+    
+    let verifier = ClientVerifier::load_from_file(&public_key_path)?;
+    println!("   🔑 已加载服务端公钥");
+    
     // 1. 创建客户端握手实例
     let client_handshake = ClientHandshake::new(PSK);
     
     // 2. 发送 ClientHello
     let client_hello = client_handshake.create_client_hello(client_id, virtual_ip);
+    
+    // 保存 client_pubkey 用于验证
+    let client_pubkey = match &client_hello {
+        HandshakeMessage::ClientHello { client_pubkey, .. } => *client_pubkey,
+        _ => unreachable!(),
+    };
+    
     let hello_data = serialize_message(&client_hello)?;
     socket.send_to(&hello_data, server_addr).await?;
     println!("   📤 已发送 ClientHello");
@@ -48,19 +70,27 @@ async fn perform_handshake(
     ).await??;
     
     let server_hello = deserialize_message(&buf[..n])?;
-    let server_pubkey = match server_hello {
-        HandshakeMessage::ServerHello { server_pubkey } => server_pubkey,
-        _ => return Err("Expected ServerHello".into()),
+    let (server_pubkey, signature) = match server_hello {
+        HandshakeMessage::ServerHello { server_pubkey, signature } => (server_pubkey, signature),
+        _ => return Err("预期收到 ServerHello".into()),
     };
     println!("   📥 收到 ServerHello");
+    
+    // 3.5. 验证服务端签名
+    let message_to_verify = [
+        &server_pubkey[..],
+        &client_pubkey[..],
+    ].concat();
+    
+    verifier.verify(&message_to_verify, &signature)?;
+    println!("   ✅ 服务端身份验证成功！");
     
     // 4. 计算会话密钥（消耗 client_handshake）
     let session_key = client_handshake.process_server_hello(server_pubkey)?;
     println!("   🔑 会话密钥协商成功");
     
     // 注意：这里简化了协议，省略了 ClientFinish/ServerFinish
-    // 完整实现应该继续发送确认消息
-    
+    // 完整实现应该继续发送确认消息    
     Ok(session_key)
 }
 

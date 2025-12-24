@@ -1,0 +1,5 @@
+# 忽略服务端私钥（敏感信息）
+server_private.key
+
+# 保留公钥文件（可以分发）
+!server_public.key

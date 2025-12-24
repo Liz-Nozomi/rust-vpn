@@ -19,6 +19,7 @@ pub enum HandshakeMessage {
     /// 服务端响应：携带服务端的临时公钥
     ServerHello {
         server_pubkey: [u8; 32],
+        signature: Vec<u8>,  // 服务端对握手消息的签名
     },
     
     /// 客户端确认：用会话密钥加密的确认消息
@@ -73,7 +74,7 @@ impl ClientHandshake {
         let server_pk = PublicKey::from(server_pubkey);
         
         // 执行 ECDH 密钥交换
-        let shared_secret = self.client_secret.diffie_hellman(&server_pk);
+        let shared_secret: x25519_dalek::SharedSecret = self.client_secret.diffie_hellman(&server_pk);
         
         // 使用 BLAKE3 派生会话密钥
         // 会话密钥 = KDF(ECDH_shared || PSK)
@@ -111,11 +112,13 @@ impl ServerHandshake {
         }
     }
     
-    /// 处理 ClientHello，生成 ServerHello
+    /// 处理 ClientHello，生成 ServerHello（不包含签名，签名需要在外部添加）
     pub fn process_client_hello(&self, _client_pubkey: [u8; 32]) -> HandshakeMessage {
         // 这里可以做一些验证，比如检查客户端公钥格式
+        // 注意：signature 应该在外部由 ServerIdentity 添加
         HandshakeMessage::ServerHello {
             server_pubkey: self.server_pubkey.to_bytes(),
+            signature: vec![], // 占位符，实际使用时应由外部填充
         }
     }
     
@@ -207,7 +210,7 @@ mod tests {
         // 3. ServerHello
         let server_hello = server.process_client_hello(client_pubkey);
         let server_pubkey = match &server_hello {
-            HandshakeMessage::ServerHello { server_pubkey } => *server_pubkey,
+            HandshakeMessage::ServerHello { server_pubkey, .. } => *server_pubkey,
             _ => panic!("Wrong message type"),
         };
         
