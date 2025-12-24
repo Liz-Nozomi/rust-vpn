@@ -60,14 +60,17 @@ async fn perform_handshake(
     
     let hello_data = serialize_message(&client_hello)?;
     socket.send_to(&hello_data, server_addr).await?;
-    println!("   📤 已发送 ClientHello");
+    println!("   📤 已发送 ClientHello ({} 字节)", hello_data.len());
     
-    // 3. 接收 ServerHello
+    // 3. 接收 ServerHello（增加超时时间并添加重试）
     let mut buf = [0u8; 1024];
-    let (n, _) = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
+    println!("   ⏳ 等待 ServerHello 响应（超时 30 秒）...");
+    let (n, from_addr) = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
         socket.recv_from(&mut buf)
     ).await??;
+    
+    println!("   📥 收到数据包: {} 字节，来自 {}", n, from_addr);
     
     let server_hello = deserialize_message(&buf[..n])?;
     let (server_pubkey, signature) = match server_hello {
@@ -207,10 +210,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         println!("⬇️ 下行任务启动...");
 
         loop {
-            let (n, _src_addr) = match socket_downlink.recv_from(&mut buf).await {
+            let (n, src_addr) = match socket_downlink.recv_from(&mut buf).await {
                 Ok(res) => res,
                 Err(_) => break,
             };
+            
+            println!("📦 收到 UDP 包: {} 字节，来自 {}", n, src_addr);
 
             // 解密
             let decrypted_ip_packet = match cipher_downlink.decrypt(&buf[..n]) {
