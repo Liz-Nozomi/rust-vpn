@@ -102,8 +102,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // === 1. 获取命令行参数 ===
     let args: Vec<String> = env::args().collect();
     
-    // 用法: ./vpn_client <虚拟IP> [服务器地址]
-    // 示例: ./vpn_client 10.0.0.2 example.com:9000
+    // 用法: ./vpn_client <虚拟IP> [服务器地址] [--full-tunnel]
+    // 示例: ./vpn_client 10.0.0.2 example.com:9000 --full-tunnel
     let tun_ip = if args.len() > 1 { args[1].clone() } else { "10.0.0.1".to_string() };
     let server_addr = if args.len() > 2 { 
         args[2].clone()
@@ -111,13 +111,25 @@ async fn main() -> Result<(), Box<dyn Error>> {
         "127.0.0.1:9000".to_string()
     };
     
+    // 检查是否启用全隧道模式（所有流量走VPN）
+    let full_tunnel = args.contains(&"--full-tunnel".to_string());
+    
     println!("🛡️ VPN Client Starting...");
     println!("📍 虚拟 IP: {}", tun_ip);
     println!("🌐 服务器: {}", server_addr);
+    if full_tunnel {
+        println!("🌍 全隧道模式：所有流量将通过VPN");
+    } else {
+        println!("🔗 分流模式：仅VPN网段流量走VPN");
+    }
     
     // === 配置 ===
     let tun_mask = "255.255.255.0";
-    let target_cidr = "10.0.0.0/24"; 
+    let target_cidr = if full_tunnel {
+        "0.0.0.0/0" // 默认路由，所有流量
+    } else {
+        "10.0.0.0/24" // 仅VPN网段
+    };
 
     // === 3. 创建 UDP Socket（握手前需要先创建） ===
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
@@ -135,9 +147,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let dev_name = dev.get_ref().name()?; 
     
     // === 路由配置 (容错处理) ===
-    // 在本地双开测试时，第二个客户端配置路由可能会冲突，我们允许它失败并继续
     match local_tun::configure_route(&dev_name, target_cidr) {
-        Ok(_) => println!("✅ 路由配置成功"),
+        Ok(_) => {
+            if full_tunnel {
+                println!("✅ 默认路由已设置（所有流量走VPN）");
+                println!("   ⚠️  注意：这会中断当前网络连接！按 Ctrl+C 退出时会自动恢复");
+            } else {
+                println!("✅ 路由配置成功");
+            }
+        }
         Err(e) => eprintln!("⚠️ 路由配置警告 (本地多开时可忽略): {}", e),
     }
     

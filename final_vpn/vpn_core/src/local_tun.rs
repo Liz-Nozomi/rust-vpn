@@ -4,8 +4,7 @@ use std::net::Ipv4Addr;
 use std::process::Command; // 引入 Command
 use std::str::FromStr;
 use tun::{Configuration, AsyncDevice}; 
-
-type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+use anyhow::Result;
 
 pub fn create_device(address: &str, netmask: &str) -> Result<AsyncDevice> {
     let ip = Ipv4Addr::from_str(address)?;
@@ -53,6 +52,6 @@ pub fn configure_route(dev_name: &str, cidr: &str) -> Result<()> {
         Ok(())
     } else {
         // 创建一个简单的错误信息
-        Err(format!("路由配置失败 (exit code: {:?})", status.code()).into())
+        anyhow::bail!("路由配置失败 (exit code: {:?})", status.code())
     }
 }

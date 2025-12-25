@@ -1,21 +1,34 @@
 // vpn_server/src/main.rs
 
 use tokio::net::UdpSocket;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use std::collections::HashMap;
 use std::net::{SocketAddr, Ipv4Addr};
 use std::sync::Arc;
 use tokio::sync::Mutex; // 用于多线程/异步任务间共享 Map
 use anyhow::Result;
+use tun::Device; // 导入 Device trait
 
 // 引入核心库
 use vpn_core::symmetric::Cipher;
 use vpn_core::handshake::{ServerHandshake, HandshakeMessage, serialize_message, deserialize_message};
 use vpn_core::asymmetric::{ServerIdentity, get_keys_dir};
+use vpn_core::local_tun;
+use vpn_core::gateway;
 
 // 预共享密钥 (PSK) - 需与客户端一致
 const PSK: &[u8; 32] = b"0123456789abcdef0123456789abcdef";
 // 监听端口
 const LISTEN_ADDR: &str = "0.0.0.0:9000";
+// 服务端TUN设备配置
+const SERVER_TUN_IP: &str = "10.0.0.1";
+const SERVER_TUN_MASK: &str = "255.255.255.0";
+
+#[cfg(target_os = "macos")]
+const TUN_READ_OFFSET: usize = 4;
+
+#[cfg(target_os = "linux")]
+const TUN_READ_OFFSET: usize = 0;
 
 /// 定义 PeerMap: 记录 虚拟IP (10.0.0.x) -> 真实 UDP 地址 的映射
 type PeerMap = Arc<Mutex<HashMap<Ipv4Addr, SocketAddr>>>;
@@ -34,12 +47,69 @@ type SessionMap = Arc<Mutex<HashMap<SocketAddr, Session>>>;
 async fn main() -> Result<()> {
     // 1. 初始化
     println!("🚀 VPN Server 启动中...");
+    println!("⚠️  注意：网关模式需要 sudo 权限！");
+    
+    // 检测参数：是否启用网关模式
+    let args: Vec<String> = std::env::args().collect();
+    let enable_gateway = args.contains(&"--gateway".to_string());
+    
+    if enable_gateway {
+        println!("🌐 启用网关模式（NAT转发到互联网）");
+    } else {
+        println!("🔗 点对点模式（仅客户端间互联）");
+        println!("   提示：使用 --gateway 参数启用互联网转发");
+    }
     
     // 加载或生成服务端密钥对
     let keys_dir = get_keys_dir()?;
     let server_identity = ServerIdentity::load_or_generate(&keys_dir)?;
     server_identity.print_public_key();
     let server_identity = Arc::new(server_identity);
+    
+    // 创建 TUN 设备
+    let tun_dev = local_tun::create_device(SERVER_TUN_IP, SERVER_TUN_MASK)?;
+    let tun_name = tun_dev.get_ref().name()?;
+    println!("✅ TUN 设备创建成功: {}", tun_name);
+    
+    // 配置路由
+    match local_tun::configure_route(&tun_name, "10.0.0.0/24") {
+        Ok(_) => println!("✅ 路由配置成功"),
+        Err(e) => println!("⚠️  路由配置警告: {}", e),
+    }
+    
+    // 如果启用网关模式，配置IP转发和NAT
+    if enable_gateway {
+        println!("\n🔧 配置网关功能...");
+        
+        // 启用IP转发
+        if let Err(e) = gateway::enable_ip_forwarding() {
+            eprintln!("❌ 启用IP转发失败: {}", e);
+            eprintln!("   请使用 sudo 运行服务端");
+            return Err(anyhow::anyhow!("IP转发失败"));
+        }
+        
+        // 检测外网接口
+        let external_if = match gateway::detect_default_interface() {
+            Ok(iface) => {
+                println!("   🔍 检测到外网接口: {}", iface);
+                iface
+            }
+            Err(e) => {
+                eprintln!("⚠️  无法自动检测外网接口: {}", e);
+                println!("   请手动指定外网接口（如 eth0, en0, wlan0）");
+                return Err(anyhow::anyhow!("无法检测外网接口"));
+            }
+        };
+        
+        // 配置NAT
+        if let Err(e) = gateway::setup_nat(&tun_name, &external_if) {
+            eprintln!("⚠️  NAT配置失败: {}", e);
+            #[cfg(target_os = "macos")]
+            println!("   macOS 用户需要手动配置 pfctl（参考上方提示）");
+        }
+        
+        println!("✅ 网关配置完成\n");
+    }
     
     let socket = UdpSocket::bind(LISTEN_ADDR).await?;
     println!("📡 正在监听 UDP: {}", socket.local_addr()?);
@@ -50,7 +120,75 @@ async fn main() -> Result<()> {
     let peers: PeerMap = Arc::new(Mutex::new(HashMap::new()));
     let sessions: SessionMap = Arc::new(Mutex::new(HashMap::new()));
 
-    let mut buf = [0u8; 4096]; // 接收缓冲区
+    // 分离 TUN 设备读写
+    let (mut tun_reader, tun_writer) = tokio::io::split(tun_dev);
+    let tun_writer = Arc::new(Mutex::new(tun_writer));
+
+    // 启动 TUN -> UDP 任务（从TUN读取，发送到客户端）
+    let socket_tun_to_udp = socket.clone();
+    let peers_tun_to_udp = peers.clone();
+    let sessions_tun_to_udp = sessions.clone();
+    
+    tokio::spawn(async move {
+        let mut buf = [0u8; 1500];
+        println!("⬆️  TUN->UDP 任务启动");
+        
+        loop {
+            let n = match tun_reader.read(&mut buf).await {
+                Ok(n) => n,
+                Err(e) => {
+                    eprintln!("TUN 读取错误: {}", e);
+                    break;
+                }
+            };
+            
+            if n <= TUN_READ_OFFSET {
+                continue;
+            }
+            
+            let ip_packet = &buf[TUN_READ_OFFSET..n];
+            
+            // 解析目标IP
+            if ip_packet.len() < 20 {
+                continue;
+            }
+            
+            let dst_ip = Ipv4Addr::new(
+                ip_packet[16],
+                ip_packet[17],
+                ip_packet[18],
+                ip_packet[19],
+            );
+            
+            // 查找目标客户端
+            let target_addr = {
+                let map = peers_tun_to_udp.lock().await;
+                map.get(&dst_ip).cloned()
+            };
+            
+            if let Some(addr) = target_addr {
+                // 获取目标的会话密钥
+                let session_key = {
+                    let map = sessions_tun_to_udp.lock().await;
+                    match map.get(&addr) {
+                        Some(s) => s.session_key,
+                        None => continue,
+                    }
+                };
+                
+                // 加密并发送
+                if let Ok(cipher) = Cipher::new(&session_key) {
+                    if let Ok(encrypted) = cipher.encrypt(ip_packet) {
+                        let _ = socket_tun_to_udp.send_to(&encrypted, addr).await;
+                        println!("🔁 [TUN->客户端] {} ({} 字节)", dst_ip, n);
+                    }
+                }
+            }
+        }
+    });
+
+    // UDP 接收循环
+    let mut buf = [0u8; 4096];
 
     loop {
         // 2. 接收 UDP 数据
@@ -65,7 +203,6 @@ async fn main() -> Result<()> {
         let raw_data = &buf[..len];
         
         // 3. 尝试识别是握手消息还是数据包
-        // 握手消息可以通过 bincode 反序列化成 HandshakeMessage
         if let Ok(handshake_msg) = deserialize_message(raw_data) {
             // 这是握手消息
             handle_handshake(
@@ -86,6 +223,7 @@ async fn main() -> Result<()> {
             raw_data,
             &peers,
             &sessions,
+            &tun_writer,
         ).await;
     }
 }
@@ -174,6 +312,7 @@ async fn handle_data_packet(
     encrypted_data: &[u8],
     peers: &PeerMap,
     sessions: &SessionMap,
+    tun_writer: &Arc<Mutex<tokio::io::WriteHalf<tun::AsyncDevice>>>,
 ) {
     // 1. 查找会话
     let session_key = {
@@ -216,7 +355,7 @@ async fn handle_data_packet(
         }
     }
 
-    // 5. 转发逻辑
+    // 5. 转发逻辑：优先客户端互联，其次转发到TUN（网关模式）
     let target_peer = {
         let map = peers.lock().await;
         map.get(&dst_ip).cloned()
@@ -224,16 +363,15 @@ async fn handle_data_packet(
 
     match target_peer {
         Some(target_addr) => {
-            // 查找目标的会话密钥
+            // 目标是另一个客户端，直接转发
             let target_session_key = {
                 let map = sessions.lock().await;
                 match map.get(&target_addr) {
                     Some(s) => s.session_key,
-                    None => return, // 目标未握手
+                    None => return,
                 }
             };
             
-            // 用目标的会话密钥重新加密
             let target_cipher = match Cipher::new(&target_session_key) {
                 Ok(c) => c,
                 Err(_) => return,
@@ -242,13 +380,37 @@ async fn handle_data_packet(
             match target_cipher.encrypt(&ip_packet) {
                 Ok(new_packet) => {
                     let _ = socket.send_to(&new_packet, target_addr).await;
-                    println!("🔁 转发: {} -> {}", src_ip, dst_ip);
+                    println!("🔁 [客户端互联] {} -> {}", src_ip, dst_ip);
                 }
                 Err(e) => eprintln!("加密转发失败: {}", e),
             }
         }
         None => {
-            println!("🚫 丢弃: {} -> {} (目标未上线)", src_ip, dst_ip);
+            // 目标不是客户端，尝试转发到TUN（互联网）
+            // 检查目标IP是否是本地VPN网段
+            if dst_ip.octets()[0] == 10 && dst_ip.octets()[1] == 0 && dst_ip.octets()[2] == 0 {
+                // 仍然是10.0.0.x，但客户端不在线，丢弃
+                println!("🚫 丢弃: {} -> {} (目标不在线)", src_ip, dst_ip);
+            } else {
+                // 目标是外网IP，写入TUN设备
+                #[cfg(target_os = "macos")]
+                let data_to_write = {
+                    let mut out = Vec::with_capacity(4 + ip_packet.len());
+                    out.extend_from_slice(&[0x00, 0x00, 0x00, 0x02]);
+                    out.extend_from_slice(&ip_packet);
+                    out
+                };
+                
+                #[cfg(target_os = "linux")]
+                let data_to_write = ip_packet.clone();
+                
+                let mut writer = tun_writer.lock().await;
+                if let Err(e) = writer.write_all(&data_to_write).await {
+                    eprintln!("TUN 写入失败: {}", e);
+                } else {
+                    println!("🌐 [转发到互联网] {} -> {}", src_ip, dst_ip);
+                }
+            }
         }
     }
 }
