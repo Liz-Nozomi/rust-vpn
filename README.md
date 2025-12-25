@@ -8,7 +8,7 @@
 
 ### 1. 💻 - 💻 异地组网模式（side to side VPN，类似Hamachi）
 
-<img src="Mermaid Chart - Create complex, visual diagrams with text.-2025-12-25-121104.png" alt="Mermaid Chart - Create complex, visual diagrams with text.-2025-12-25-121104" style="zoom:25%;" />
+<img src="Mermaid Chart - Create complex, visual diagrams with text.-2025-12-25-121104.png" alt="Mermaid Chart - Create complex, visual diagrams with text.-2025-12-25-121104" style="zoom:10%;" />
 
 
 ✅客户端可以相互通信
@@ -19,7 +19,7 @@
 
 ### 2. 💻 - 🌍 代理服务器（Proxy，类似某ShadowSocks）
 
-<img src="Mermaid Chart - Create complex, visual diagrams with text.-2025-12-25-121610.png" alt="Mermaid Chart - Create complex, visual diagrams with text.-2025-12-25-121610" style="zoom:25%;" />
+<img src="Mermaid Chart - Create complex, visual diagrams with text.-2025-12-25-121610.png" alt="Mermaid Chart - Create complex, visual diagrams with text.-2025-12-25-121610" style="zoom:10%;" />
 
 比较符合我们对VPN的传统认知，一个服务端充当了转发器，可以作为代理，转发所有流量。
 
@@ -69,7 +69,7 @@ final_vpn/
 
 ### 3. 协议设计
 
-![Mermaid Chart - Create complex, visual diagrams with text.-2025-12-25-123053](Mermaid Chart - Create complex, visual diagrams with text.-2025-12-25-123053.png)
+<img src="Mermaid Chart - Create complex, visual diagrams with text.-2025-12-25-123053.png" alt="Mermaid Chart - Create complex, visual diagrams with text.-2025-12-25-123053" />
 
 ### 4. 加密栈
 
