@@ -1,2 +1,30 @@
-/target
-/keys
+# Rust 构建产物
+/target/
+**/target/
+Cargo.lock  # 对于库项目应该忽略，二进制项目可以保留
+*.pdb
+*.exe
+*.dll
+*.so
+*.dylib
+
+# 密钥文件
+/keys/
+
+# IDE 和编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# 调试和日志文件
+*.log
+debug/
+*.backtrace
+
+# 临时文件
+*.tmp
+*.bak
+flycheck*
