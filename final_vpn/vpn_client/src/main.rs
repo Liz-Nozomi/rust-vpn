@@ -9,8 +9,10 @@ const TUN_READ_OFFSET: usize = 0; // Linux 配置了 no_pi，所以是 0
 use std::env; // 引入环境模块读取参数
 use std::sync::Arc;
 use std::error::Error;
+use std::process::Command;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UdpSocket;
+use tokio::sync::Mutex;
 use tun::Device; // 这一行可能需要依赖具体的 tun 库导出，如果报错可尝试删掉或检查 vpn_core
 
 // === 引用核心库 (Workspace 改动) ===
@@ -19,9 +21,101 @@ use vpn_core::symmetric::Cipher;
 use vpn_core::handshake::{ClientHandshake, HandshakeMessage, serialize_message, deserialize_message};
 use vpn_core::asymmetric::{ClientVerifier, get_keys_dir};
 
+// 全局状态：保存原始网关，用于退出时恢复
+static ORIGINAL_GATEWAY: Mutex<Option<String>> = Mutex::const_new(None);
+
 // 预共享密钥 (PSK) - 用于握手认证
 // 注意：服务端必须使用完全相同的 PSK！
 const PSK: &[u8; 32] = b"0123456789abcdef0123456789abcdef";
+
+/// 检测当前默认网关
+fn detect_default_gateway() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let output = Command::new("route")
+            .args(&["-n", "get", "default"])
+            .output()
+            .ok()?;
+        
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            if line.trim().starts_with("gateway:") {
+                if let Some(gateway) = line.split(':').nth(1).map(|s| s.trim()) {
+                    return Some(gateway.to_string());
+                }
+            }
+        }
+    }
+    
+    #[cfg(target_os = "linux")]
+    {
+        let output = Command::new("ip")
+            .args(&["route", "show", "default"])
+            .output()
+            .ok()?;
+        
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // 格式: default via 192.168.1.1 dev eth0
+        if let Some(gateway) = stdout.split_whitespace().nth(2) {
+            return Some(gateway.to_string());
+        }
+    }
+    
+    None
+}
+
+/// 恢复原始默认网关
+async fn restore_default_gateway() {
+    let gateway = {
+        let gw = ORIGINAL_GATEWAY.lock().await;
+        gw.clone()
+    };
+    
+    if let Some(gw) = gateway {
+        println!("   🔄 恢复默认路由 -> {}", gw);
+        
+        #[cfg(target_os = "macos")]
+        {
+            // 删除 VPN 默认路由
+            let _ = Command::new("route")
+                .args(&["-n", "delete", "default", "10.0.0.1"])
+                .status();
+            
+            // 恢复原始默认路由
+            let status = Command::new("route")
+                .args(&["-n", "add", "default", &gw])
+                .status();
+            
+            if status.is_ok() && status.unwrap().success() {
+                println!("   ✅ 网络已恢复");
+            } else {
+                eprintln!("   ⚠️  自动恢复失败，请手动执行: sudo route add default {}", gw);
+            }
+        }
+        
+        #[cfg(target_os = "linux")]
+        {
+            // 删除 VPN 默认路由
+            let _ = Command::new("ip")
+                .args(&["route", "del", "default", "via", "10.0.0.1"])
+                .status();
+            
+            // 恢复原始默认路由
+            let status = Command::new("ip")
+                .args(&["route", "add", "default", "via", &gw])
+                .status();
+            
+            if status.is_ok() && status.unwrap().success() {
+                println!("   ✅ 网络已恢复");
+            } else {
+                eprintln!("   ⚠️  自动恢复失败，请手动执行: sudo ip route add default via {}", gw);
+            }
+        }
+    } else {
+        eprintln!("   ⚠️  未找到原始网关信息");
+    }
+}
+
 
 /// 执行握手协议，获取会话密钥
 async fn perform_handshake(
@@ -63,7 +157,8 @@ async fn perform_handshake(
     println!("   📤 已发送 ClientHello ({} 字节)", hello_data.len());
     
     // 3. 接收 ServerHello（增加超时时间并添加重试）
-    let mut buf = [0u8; 1024];
+    // ServerHello 包含：32字节公钥 + 1088字节ML-KEM密文 + 64字节签名 + bincode开销 ≈ 1200+ 字节
+    let mut buf = [0u8; 2048];
     println!("   ⏳ 等待 ServerHello 响应（超时 30 秒）...");
     let (n, from_addr) = tokio::time::timeout(
         std::time::Duration::from_secs(30),
@@ -123,6 +218,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
         println!("🔗 分流模式：仅VPN网段流量走VPN");
     }
     
+    // === 全隧道模式：保存原始网关（用于退出时恢复） ===
+    if full_tunnel {
+        let gateway = detect_default_gateway();
+        if let Some(gw) = &gateway {
+            let mut orig_gw = ORIGINAL_GATEWAY.lock().await;
+            *orig_gw = Some(gw.clone());
+            println!("   💾 已保存原始网关: {}", gw);
+        }
+    }
+    
     // === 配置 ===
     let tun_mask = "255.255.255.0";
     let target_cidr = if full_tunnel {
@@ -142,9 +247,54 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let cipher = Arc::new(Cipher::new(&session_key)?);
     println!("🔐 加密通道已建立");
 
-    // === 2. 创建 TUN 设备 ===
+    // === 2. 创建 TUN 设备（握手成功后再创建，避免影响握手） ===
     let dev = local_tun::create_device(&tun_ip, tun_mask)?;
     let dev_name = dev.get_ref().name()?; 
+    
+    // === 全隧道模式：添加服务器路由例外（在配置默认路由之前） ===
+    if full_tunnel {
+        // 解析服务器地址，提取 IP
+        let server_ip = server_addr.split(':').next().unwrap_or(&server_addr);
+        
+        // 添加到服务器的路由例外（通过本地网关）
+        #[cfg(target_os = "macos")]
+        {
+            // 获取当前默认网关
+            let gateway_output = std::process::Command::new("route")
+                .args(&["-n", "get", "default"])
+                .output();
+            
+            if let Ok(output) = gateway_output {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                if let Some(gateway_line) = stdout.lines().find(|l| l.trim().starts_with("gateway:")) {
+                    if let Some(gateway) = gateway_line.split(':').nth(1).map(|s| s.trim()) {
+                        println!("   🛡️  添加服务器路由例外: {} via {}", server_ip, gateway);
+                        let _ = std::process::Command::new("route")
+                            .args(&["-n", "add", server_ip, gateway])
+                            .status();
+                    }
+                }
+            }
+        }
+        
+        #[cfg(target_os = "linux")]
+        {
+            // Linux 上添加例外路由
+            let gateway_output = std::process::Command::new("ip")
+                .args(&["route", "show", "default"])
+                .output();
+            
+            if let Ok(output) = gateway_output {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                if let Some(gateway) = stdout.split_whitespace().nth(2) {
+                    println!("   🛡️  添加服务器路由例外: {} via {}", server_ip, gateway);
+                    let _ = std::process::Command::new("ip")
+                        .args(&["route", "add", server_ip, "via", gateway])
+                        .status();
+                }
+            }
+        }
+    }
     
     // === 路由配置 (容错处理) ===
     match local_tun::configure_route(&dev_name, target_cidr) {
@@ -160,6 +310,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
     
     println!("🚀 TUN 设备 {} 就绪", dev_name);
+
+    // === 注册 Ctrl+C 信号处理器（优雅退出） ===
+    if full_tunnel {
+        tokio::spawn(async move {
+            tokio::signal::ctrl_c().await.ok();
+            println!("\n\n🛑 收到退出信号，正在恢复网络...");
+            restore_default_gateway().await;
+            std::process::exit(0);
+        });
+    }
 
     // === Socket 已在握手前创建，这里转为 Arc ===
     let socket = Arc::new(socket);
