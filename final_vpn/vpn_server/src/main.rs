@@ -100,17 +100,23 @@ async fn handle_handshake(
     server_identity: &ServerIdentity,
 ) {
     match msg {
-        HandshakeMessage::ClientHello { client_pubkey, client_id, virtual_ip } => {
+        HandshakeMessage::ClientHello { client_pubkey, client_mlkem_pk, client_id, virtual_ip } => {
             println!("🤝 收到握手请求: {} ({}) IP: {}", client_id, client_addr, virtual_ip);
             
             // 创建服务端握手实例
             let server_handshake = ServerHandshake::new(PSK);
             
-            // 生成 ServerHello（不包含签名）
-            let mut server_hello = server_handshake.process_client_hello(client_pubkey);
+            // 生成 ServerHello（使用ML-KEM封装，返回密文和共享密钥）
+            let (mut server_hello, mlkem_shared) = match server_handshake.process_client_hello(client_pubkey, &client_mlkem_pk) {
+                Ok(result) => result,
+                Err(e) => {
+                    eprintln!("❌ ML-KEM封装失败: {}", e);
+                    return;
+                }
+            };
             
             // 对握手消息签名：签名内容 = server_pubkey || client_pubkey
-            if let HandshakeMessage::ServerHello { server_pubkey, ref mut signature } = server_hello {
+            if let HandshakeMessage::ServerHello { server_pubkey, ref mut signature, .. } = server_hello {
                 let message_to_sign = [
                     &server_pubkey[..],
                     &client_pubkey[..],
@@ -120,14 +126,15 @@ async fn handle_handshake(
                 println!("   ✍️  已对握手消息签名");
             }
             
-            // 计算会话密钥（消耗 server_handshake）
-            let session_key = match server_handshake.compute_session_key(client_pubkey) {
+            // 计算会话密钥（混合：X25519 + ML-KEM，消耗 server_handshake）
+            let session_key = match server_handshake.compute_session_key(client_pubkey, &mlkem_shared) {
                 Ok(key) => key,
                 Err(e) => {
                     eprintln!("❌ 密钥计算失败: {}", e);
                     return;
                 }
             };
+            println!("   🔑 会话密钥协商成功（X25519 + ML-KEM-768）");
             
             // 保存会话
             {

@@ -73,8 +73,8 @@ async fn perform_handshake(
     println!("   📥 收到数据包: {} 字节，来自 {}", n, from_addr);
     
     let server_hello = deserialize_message(&buf[..n])?;
-    let (server_pubkey, signature) = match server_hello {
-        HandshakeMessage::ServerHello { server_pubkey, signature } => (server_pubkey, signature),
+    let (server_pubkey, mlkem_ciphertext, signature) = match server_hello {
+        HandshakeMessage::ServerHello { server_pubkey, mlkem_ciphertext, signature } => (server_pubkey, mlkem_ciphertext, signature),
         _ => return Err("预期收到 ServerHello".into()),
     };
     println!("   📥 收到 ServerHello");
@@ -88,9 +88,9 @@ async fn perform_handshake(
     verifier.verify(&message_to_verify, &signature)?;
     println!("   ✅ 服务端身份验证成功！");
     
-    // 4. 计算会话密钥（消耗 client_handshake）
-    let session_key = client_handshake.process_server_hello(server_pubkey)?;
-    println!("   🔑 会话密钥协商成功");
+    // 4. 计算会话密钥（混合：X25519 + ML-KEM，消耗 client_handshake）
+    let session_key = client_handshake.process_server_hello(server_pubkey, &mlkem_ciphertext)?;
+    println!("   🔑 会话密钥协商成功（X25519 + ML-KEM-768）");
     
     // 注意：这里简化了协议，省略了 ClientFinish/ServerFinish
     // 完整实现应该继续发送确认消息    
