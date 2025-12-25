@@ -8,7 +8,8 @@
 
 ### 1. 💻 - 💻 异地组网模式（side to side VPN，类似Hamachi）
 
-<img src="/Users/liz/Downloads/Mermaid Chart - Create complex, visual diagrams with text.-2025-12-25-121104.png" alt="Mermaid Chart - Create complex, visual diagrams with text.-2025-12-25-121104" style="zoom: 10%;" />
+<img src="Mermaid Chart - Create complex, visual diagrams with text.-2025-12-25-121104.png" alt="Mermaid Chart - Create complex, visual diagrams with text.-2025-12-25-121104" style="zoom:25%;" />
+
 
 ✅客户端可以相互通信
 
@@ -18,23 +19,21 @@
 
 ### 2. 💻 - 🌍 代理服务器（Proxy，类似某ShadowSocks）
 
-<img src="/Users/liz/Downloads/Mermaid Chart - Create complex, visual diagrams with text.-2025-12-25-121610.png" alt="Mermaid Chart - Create complex, visual diagrams with text.-2025-12-25-121610" style="zoom:10%;" />
+<img src="Mermaid Chart - Create complex, visual diagrams with text.-2025-12-25-121610.png" alt="Mermaid Chart - Create complex, visual diagrams with text.-2025-12-25-121610" style="zoom:25%;" />
 
 比较符合我们对VPN的传统认知，一个服务端充当了转发器，可以作为代理，转发所有流量。
 
 同时，这个模式也保留了异地组网的能力。
 
-
-
 #### 3. 项目结构
 
 ```graph
 final_vpn/
-├── keys/              
-│   ├── .gitignore            
+├── keys/            
+│   ├── .gitignore          
 │   ├── README.md             # 密钥说明文档
-│   ├── server_private.key    
-│   └── server_public.key     
+│   ├── server_private.key  
+│   └── server_public.key   
 ├── vpn_core/          # 核心库
 │   ├── src/
 │   │   ├── lib.rs            # 模块导出
@@ -51,8 +50,6 @@ final_vpn/
     ├── src/main.rs           # TUN 读写、加密通信、路由配置
     └── Cargo.toml
 ```
-
-
 
 ## 🛡️ 安全机制
 
@@ -72,9 +69,7 @@ final_vpn/
 
 ### 3. 协议设计
 
-![Mermaid Chart - Create complex, visual diagrams with text.-2025-12-25-123053](/Users/liz/Downloads/Mermaid Chart - Create complex, visual diagrams with text.-2025-12-25-123053.png)
-
-
+![Mermaid Chart - Create complex, visual diagrams with text.-2025-12-25-123053](Mermaid Chart - Create complex, visual diagrams with text.-2025-12-25-123053.png)
 
 ### 4. 加密栈
 
@@ -104,7 +99,7 @@ final_vpn/
 
 ## 🗃️ 编译
 
-``` bash
+```bash
 git clone https://github.com/Liz-Nozomi/rust-vpn
 cd final_vpn
 
@@ -116,7 +111,7 @@ cargo build --release --bin vpn_server
 cargo build --release --bin vpn_client
 ```
 
-二进制文件都放在`rust_vpn/final_vpn/target/release` 里面。
+二进制文件都放在 `rust_vpn/final_vpn/target/release` 里面。
 
 ## 🔗使用方法
 
@@ -124,13 +119,13 @@ cargo build --release --bin vpn_client
 
 在server和client上都clone好项目。随后，首次运行，服务端会生成密钥对。
 
-``` bash
+```bash
 ./target/release/vpn_server
 ```
 
-密钥对存放在`/keys`中，
+密钥对存放在 `/keys`中，
 
-# <u>**一定不要泄漏自己的私钥**</u>
+# `<u>`**一定不要泄漏自己的私钥**`</u>`
 
 公钥是可以随意传播的。从服务器上把这个公钥下载下来（如果愿意折磨自己写入十六进制文件我也没意见），然后放到客户端的keys里面。
 
@@ -138,7 +133,7 @@ cargo build --release --bin vpn_client
 
 #### 场景一：本地测试
 
-``` bash
+```bash
 ./target/release/vpn_server
 sudo ./target/release/vpn_client 10.0.0.2 127.0.0.1:9000
 sudo ./target/release/vpn_client 10.0.0.3 127.0.0.1:9000
@@ -151,19 +146,19 @@ ping 10.0.0.3
 
 服务端（假设ip为114.51.4.191）：
 
-``` bash
+```bash
 ./target/release/vpn_server
 ```
 
 客户端：
 
-``` bash
+```bash
 sudo ./target/release/vpn_client 10.0.0.2 114.51.4.191:9000
 ```
 
 另一台机：
 
-``` bash
+```bash
 sudo ./target/release/vpn_client 10.0.0.3 114.51.4.191:9000
 ```
 
@@ -175,7 +170,7 @@ sudo是用来开tun接口的，这个是必须的。
 
 服务端：
 
-``` bash
+```bash
 sudo ./target/release/vpn_server --gateway
 ```
 
@@ -183,34 +178,31 @@ sudo ./target/release/vpn_server --gateway
 
 程序会自动：
 
--  创建 TUN 设备（tun0）
--  启用 IP 转发（`/proc/sys/net/ipv4/ip_forward = 1`）
--  检测外网接口（如 eth0）
--  配置 iptables NAT 规则
+- 创建 TUN 设备（tun0）
+- 启用 IP 转发（`/proc/sys/net/ipv4/ip_forward = 1`）
+- 检测外网接口（如 eth0）
+- 配置 iptables NAT 规则
 
 客户端：
 
 1. 全隧道模式（对应常用VPN的“全局”）
 
-   ``` bash
+   ```bash
    sudo ./target/release/vpn_client 10.0.0.2 114.51.4.191:9000 --full-tunnel
    ```
 
    - 默认路由指向 VPN
    - 所有网络流量通过服务器
    - 公网 IP 变为服务器 IP
-
 2. 分流模式（对应“规则”，当然在这里实现一个RULE实在是没那么多时间写）
 
-   ``` bash
+   ```bash
    sudo ./target/release/vpn_client 10.0.0.2 <服务器IP>:9000
    ```
 
    - 仅 10.0.0.0/24 走 VPN
    - 其他流量走本地网关
    - 适合需要同时访问内网和 VPN 的场景
-
-
 
 ## 🙅 故障排除
 
@@ -275,7 +267,6 @@ sudo route add 8.8.8.0/24 10.0.0.1
    
    # macOS（在系统偏好设置中配置）
    ```
-
 2. **确认服务端已启动：**
 
    ```bash
@@ -283,7 +274,6 @@ sudo route add 8.8.8.0/24 10.0.0.1
    # Linux
    sudo ss -tunlp | grep 9000
    ```
-
 3. **检查网络连通性：**
 
    ```bash
@@ -293,16 +283,12 @@ sudo route add 8.8.8.0/24 10.0.0.1
    # 测试 UDP 连接（需要 nc 工具）
    nc -u <服务器IP> 9000
    ```
-
 4. **确认公钥文件存在：**
 
    ```bash
    ls -l keys/server_public.key
    ```
-
 5. **在云服务商的防火墙规则里，放通9000端口。**
-
-   
 
 ## ⚠️ 免责声明
 
@@ -324,6 +310,3 @@ sudo route add 8.8.8.0/24 10.0.0.1
 4. **限制源 IP**：可在服务端代码中添加 IP 白名单
 5. **监控日志**：使用 systemd 或 syslog 管理日志
 6. **定期更新**：及时更新依赖库
-
-
-

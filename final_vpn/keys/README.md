@@ -19,7 +19,8 @@ cargo run --bin vpn_server
 
 ## 安全提示
 
-⚠️ **重要**: 
+⚠️ **重要**:
+
 - `server_private.key` 必须妥善保管，不要提交到版本控制系统
 - 如果私钥泄露，请立即重新生成密钥对
 - 客户端必须拥有正确的 `server_public.key` 才能连接
