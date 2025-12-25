@@ -2,4 +2,4 @@
 server_private.key
 
 # 保留公钥文件（可以分发）
-!server_public.key
+server_public.key
